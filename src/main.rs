@@ -13,33 +13,27 @@ use std::path::Path;
 const PATTERN_LENGTH: usize = 8; // sizeof(void*)
 
 fn main() {
-    if let Some(args) = parse_args() {
-        let predicate = create_predicate().unwrap();
-        search_memory(PATTERN_LENGTH, predicate, args.continuous).unwrap();
-    }
+    let args = parse_args().unwrap();
+    let predicate = create_predicate().unwrap();
+    search_memory(PATTERN_LENGTH, predicate, args.continuous).unwrap();
 }
 
 #[derive(Debug)]
+#[allow(dead_code)]
 enum SearchError {
-    ProcTraversePidsIo(#[allow(dead_code)] io::Error),
+    CliArgParseError(String),
+    ProcTraversePidsIo(io::Error),
     ProcParseInt {
-        #[allow(dead_code)]
         file: String,
-        #[allow(dead_code)]
         val: String,
-        #[allow(dead_code)]
         err: std::num::ParseIntError,
     },
     ProcParseLine {
-        #[allow(dead_code)]
         file: String,
-        #[allow(dead_code)]
         line: String,
     },
     SearchMemIo {
-        #[allow(dead_code)]
         pid: u32,
-        #[allow(dead_code)]
         err: io::Error,
     },
     PermissionDeniedKallsyms,
@@ -79,15 +73,25 @@ struct Args {
     continuous: bool,
 }
 
-fn parse_args() -> Option<Args> {
+fn parse_args() -> Result<Args> {
     let args: Vec<String> = std::env::args().collect();
-    if args.len() > 2 {
-        return None;
+
+    // Default values
+    let mut continuous = false;
+
+    for arg in args[1..].iter() {
+        match arg.as_ref() {
+            "--continuous" => continuous = true,
+            _ => {
+                return Err(SearchError::CliArgParseError(format!(
+                    "Unexpected argument {}",
+                    arg
+                )))
+            }
+        }
     }
 
-    let continuous = args.len() == 2 && args[1] == "--continuous";
-
-    Some(Args { continuous })
+    Ok(Args { continuous })
 }
 
 fn create_predicate() -> Result<impl Fn(u64) -> bool> {
