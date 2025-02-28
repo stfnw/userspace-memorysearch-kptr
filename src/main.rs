@@ -8,10 +8,20 @@ use std::fs::File;
 use std::io::{self, BufRead, Read, Seek, SeekFrom};
 use std::str;
 
+const PATTERN_LENGTH: usize = 8; // sizeof(void*)
+
+// Documentation/arch/x86/x86_64/mm.rst
+const KERNEL_MEMORY_MIN: u64 = 0xFFFF800000000000;
+const KERNEL_MEMORY_MAX: u64 = 0xFFFFFFFFFFFFFFFF;
+
 fn main() -> io::Result<()> {
-    let pattern = b"pattern_to_search"; // TODO
-    search_memory(pattern)?;
+    search_memory(PATTERN_LENGTH, my_predicate)?;
     Ok(())
+}
+
+fn my_predicate(val: u64) -> bool {
+    KERNEL_MEMORY_MIN < val && val < KERNEL_MEMORY_MAX
+    // note `<` and not `<=` to exclude more false positives (e.g. memory filled with 0xff)
 }
 
 #[derive(Debug)]
@@ -22,16 +32,27 @@ struct MemoryRegion {
     pathname: Option<String>,
 }
 
-fn search_memory(pattern: &[u8]) -> io::Result<()> {
+fn search_memory(chunksize: usize, predicate: fn(u64) -> bool) -> io::Result<()> {
     let regions = read_memory_maps()?;
     let mut mem_file = File::open("/proc/self/mem")?;
 
     for region in regions {
+        // Exclude non-readable memory regions.
         if !region.permissions.contains('r') {
             continue;
         }
 
-        // https://lwn.net/Articles/615809/ Implementing virtual system calls
+        // Exclude programs / executable memory regions. This assumes that those do not contain any
+        // interesting addresses; we assume interesting addressess are mostly contained in dynamic
+        // memory (stack or heap). This assumption may be wrong though.
+        if region.permissions.contains('x') && !region.permissions.contains('w') {
+            continue;
+        }
+
+        // https://lwn.net/Articles/615809/ Implementing virtual system calls.
+        // These memory regions somehow cause an error on reading, even thow by page table
+        // permissions they are supposed to be readable. => Just exclude them, they probably don't
+        // contain anything of interest.
         if let Some(p) = &region.pathname {
             if p.contains("[vdso]") || p.contains("[vvar]") {
                 continue;
@@ -44,19 +65,23 @@ fn search_memory(pattern: &[u8]) -> io::Result<()> {
         mem_file.seek(SeekFrom::Start(region.start as u64))?;
         match mem_file.read_exact(&mut buffer) {
             Ok(_) => {
-                if let Some(pos) = buffer
-                    .windows(pattern.len())
-                    .position(|window| window == pattern)
-                {
-                    println!(
-                        "Found pattern at address: 0x{:x}{}",
-                        region.start + pos,
-                        if let Some(p) = region.pathname {
-                            format!("(in region {})", p)
-                        } else {
-                            String::new()
-                        }
-                    );
+                // Note: we iterate in *non-overlapping* windows/chunks,
+                // because pointers are usually 8-byte-aligned.
+                for (pos, chunk) in buffer.chunks_exact(chunksize).enumerate() {
+                    let val = u64::from_le_bytes(chunk.try_into().unwrap());
+                    if predicate(val) {
+                        println!(
+                            "0x{:016X}: Found pattern 0x{:016x} ({}{})",
+                            region.start + pos,
+                            val,
+                            region.permissions,
+                            if let Some(ref p) = region.pathname {
+                                format!(", in region {}", p)
+                            } else {
+                                String::new()
+                            }
+                        );
+                    }
                 }
             }
             Err(e) => {
