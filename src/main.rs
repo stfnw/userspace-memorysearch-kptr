@@ -10,7 +10,7 @@ use std::str;
 
 const PATTERN_LENGTH: usize = 8; // sizeof(void*)
 
-// Documentation/arch/x86/x86_64/mm.rst
+// From kernel source Documentation/arch/x86/x86_64/mm.rst
 const KERNEL_MEMORY_MIN: u64 = 0xFFFF800000000000;
 const KERNEL_MEMORY_MAX: u64 = 0xFFFFFFFFFFFFFFFF;
 
@@ -54,7 +54,7 @@ fn search_memory(chunksize: usize, predicate: fn(u64) -> bool) -> io::Result<()>
         // permissions they are supposed to be readable. => Just exclude them, they probably don't
         // contain anything of interest.
         if let Some(p) = &region.pathname {
-            if p.contains("[vdso]") || p.contains("[vvar]") {
+            if p.contains("[vdso]") || p.contains("[vvar]") || p.contains("[vvar_vclock]") {
                 continue;
             }
         }
@@ -71,8 +71,9 @@ fn search_memory(chunksize: usize, predicate: fn(u64) -> bool) -> io::Result<()>
                     let val = u64::from_le_bytes(chunk.try_into().unwrap());
                     if predicate(val) {
                         println!(
-                            "0x{:016X}: Found pattern 0x{:016x} ({}{})",
+                            "0x{:016X} (offset 0x{:08X}): Found pattern 0x{:016x} ({}{})",
                             region.start + pos,
+                            pos,
                             val,
                             region.permissions,
                             if let Some(ref p) = region.pathname {
