@@ -10,18 +10,13 @@ use std::str;
 
 const PATTERN_LENGTH: usize = 8; // sizeof(void*)
 
-// From kernel source Documentation/arch/x86/x86_64/mm.rst
-const KERNEL_MEMORY_MIN: u64 = 0xFFFF800000000000;
-const KERNEL_MEMORY_MAX: u64 = 0xFFFFFFFFFFFFFFFF;
-
 fn main() -> io::Result<()> {
-    search_memory(PATTERN_LENGTH, my_predicate)?;
-    Ok(())
-}
+    // sudo grep -w -e _text -e _etext /proc/kallsyms
+    let start: u64 = 0xffffffffb3000000;
+    let end: u64 = 0xffffffffb4000000;
 
-fn my_predicate(val: u64) -> bool {
-    KERNEL_MEMORY_MIN < val && val < KERNEL_MEMORY_MAX
-    // note `<` and not `<=` to exclude more false positives (e.g. memory filled with 0xff)
+    search_memory(PATTERN_LENGTH, |x| start <= x && x <= end)?;
+    Ok(())
 }
 
 #[derive(Debug)]
@@ -32,7 +27,7 @@ struct MemoryRegion {
     pathname: Option<String>,
 }
 
-fn search_memory(chunksize: usize, predicate: fn(u64) -> bool) -> io::Result<()> {
+fn search_memory<T: Fn(u64) -> bool>(chunksize: usize, predicate: T) -> io::Result<()> {
     let regions = read_memory_maps()?;
     let mut mem_file = File::open("/proc/self/mem")?;
 
