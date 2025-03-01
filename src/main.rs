@@ -4,8 +4,9 @@
 // I expect it to yield lots of false positives and no actual results.
 // For educational purposes only.
 
-use std::fs::File;
+use std::fs::{self, File};
 use std::io::{self, BufRead, Read, Seek, SeekFrom};
+use std::path::Path;
 use std::str;
 
 const PATTERN_LENGTH: usize = 8; // sizeof(void*)
@@ -15,7 +16,20 @@ fn main() -> io::Result<()> {
     let start: u64 = 0xffffffffb3000000;
     let end: u64 = 0xffffffffb4000000;
 
-    search_memory(PATTERN_LENGTH, |x| start <= x && x <= end)?;
+    for entry in fs::read_dir(Path::new("/proc"))? {
+        let path = entry?.path();
+
+        // Check if the entry is a directory and if its name is a number (PID)
+        if path.is_dir() {
+            if let Some(pid) = path.file_name().and_then(|s| s.to_str()) {
+                if pid.chars().all(char::is_numeric) {
+                    println!("Found process with PID: {}", pid);
+                    search_memory(pid, PATTERN_LENGTH, |x| start <= x && x <= end)?;
+                }
+            }
+        }
+    }
+
     Ok(())
 }
 
@@ -27,9 +41,9 @@ struct MemoryRegion {
     pathname: Option<String>,
 }
 
-fn search_memory<T: Fn(u64) -> bool>(chunksize: usize, predicate: T) -> io::Result<()> {
-    let regions = read_memory_maps()?;
-    let mut mem_file = File::open("/proc/self/mem")?;
+fn search_memory<T: Fn(u64) -> bool>(pid: &str, chunksize: usize, predicate: T) -> io::Result<()> {
+    let regions = read_memory_maps(pid)?;
+    let mut mem_file = File::open(format!("/proc/{pid}/mem"))?;
 
     for region in regions {
         // Exclude non-readable memory regions.
@@ -89,8 +103,8 @@ fn search_memory<T: Fn(u64) -> bool>(chunksize: usize, predicate: T) -> io::Resu
     Ok(())
 }
 
-fn read_memory_maps() -> io::Result<Vec<MemoryRegion>> {
-    let path = "/proc/self/maps";
+fn read_memory_maps(pid: &str) -> io::Result<Vec<MemoryRegion>> {
+    let path = format!("/proc/{pid}/maps");
     let file = File::open(path)?;
     let reader = io::BufReader::new(file);
 
