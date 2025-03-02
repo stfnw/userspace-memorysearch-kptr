@@ -24,21 +24,23 @@ fn main() -> io::Result<()> {
             if let Some(pid) = path.file_name().and_then(|s| s.to_str()) {
                 if pid.chars().all(char::is_numeric) {
                     println!("Found process with PID: {}", pid);
-                    search_memory(pid, PATTERN_LENGTH, |x| start <= x && x <= end)?;
+                    match search_memory(pid, PATTERN_LENGTH, |x| start <= x && x <= end) {
+                        Err(e) => match e.kind() {
+                            io::ErrorKind::PermissionDenied => {
+                                println!("PID {}: {:?}", pid, e);
+                                Ok(())
+                            }
+                            _ => Err(e),
+                        },
+                        o => o,
+                    }?;
+                    println!();
                 }
             }
         }
     }
 
     Ok(())
-}
-
-#[derive(Debug)]
-struct MemoryRegion {
-    start: usize,
-    end: usize,
-    permissions: String,
-    pathname: Option<String>,
 }
 
 fn search_memory<T: Fn(u64) -> bool>(pid: &str, chunksize: usize, predicate: T) -> io::Result<()> {
@@ -101,6 +103,14 @@ fn search_memory<T: Fn(u64) -> bool>(pid: &str, chunksize: usize, predicate: T) 
     }
 
     Ok(())
+}
+
+#[derive(Debug)]
+struct MemoryRegion {
+    start: usize,
+    end: usize,
+    permissions: String,
+    pathname: Option<String>,
 }
 
 fn read_memory_maps(pid: &str) -> io::Result<Vec<MemoryRegion>> {
