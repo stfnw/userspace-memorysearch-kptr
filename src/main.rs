@@ -4,46 +4,65 @@
 // I expect it to yield lots of false positives and no actual results.
 // For educational purposes only.
 
+use std::fmt;
 use std::fs::{self, File};
 use std::io::{self, BufRead, Read, Seek, SeekFrom};
 use std::path::Path;
-use std::str;
 
 const PATTERN_LENGTH: usize = 8; // sizeof(void*)
 
-fn main() -> io::Result<()> {
+fn main() {
     // sudo grep -w -e _text -e _etext /proc/kallsyms
     let start: u64 = 0xffffffffb3000000;
     let end: u64 = 0xffffffffb4000000;
 
-    for entry in fs::read_dir(Path::new("/proc"))? {
-        let path = entry?.path();
+    for entry in fs::read_dir(Path::new("/proc")).unwrap() {
+        let path = entry.unwrap().path();
 
         // Check if the entry is a directory and if its name is a number (PID)
         if path.is_dir() {
-            if let Some(pid) = path.file_name().and_then(|s| s.to_str()) {
-                if pid.chars().all(char::is_numeric) {
+            if let Some(pid_) = path.file_name().and_then(|s| s.to_str()) {
+                if let Ok(pid) = pid_.parse::<u32>() {
                     println!("Found process with PID: {}", pid);
-                    match search_memory(pid, PATTERN_LENGTH, |x| start <= x && x <= end) {
-                        Err(e) => match e.kind() {
-                            io::ErrorKind::PermissionDenied => {
-                                println!("PID {}: {:?}", pid, e);
-                                Ok(())
-                            }
-                            _ => Err(e),
-                        },
-                        o => o,
-                    }?;
+                    if let Err(e) = search_memory(pid, PATTERN_LENGTH, |x| start <= x && x <= end) {
+                        match e.kind() {
+                            io::ErrorKind::PermissionDenied => println!("PID {}: {:?}", pid, e),
+                            _ => panic!("{:?}", e),
+                        }
+                    }
                     println!();
                 }
             }
         }
     }
-
-    Ok(())
 }
 
-fn search_memory<T: Fn(u64) -> bool>(pid: &str, chunksize: usize, predicate: T) -> io::Result<()> {
+
+#[derive(Debug)]
+struct Match {
+    pid: u32,
+    uaddr: u64, // Address in userspace.
+    kaddr: u64, // Potential kernel address leak.
+    regiondesc: String,
+}
+
+impl fmt::Display for Match {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(
+            f,
+            "PID {}: At 0x{:016X} found pattern 0x{:016x} ({})",
+            self.pid, self.uaddr, self.kaddr, self.regiondesc
+        )
+    }
+}
+
+fn search_memory<T: Fn(u64) -> bool>(
+    pid: u32,
+    chunksize: usize,
+    predicate: T,
+) -> io::Result<Vec<Match>> {
+    let mut matches = Vec::new();
+
     let regions = read_memory_maps(pid)?;
     let mut mem_file = File::open(format!("/proc/{pid}/mem"))?;
 
@@ -71,9 +90,9 @@ fn search_memory<T: Fn(u64) -> bool>(pid: &str, chunksize: usize, predicate: T) 
         }
 
         let size = region.end - region.start;
-        let mut buffer = vec![0u8; size];
+        let mut buffer = vec![0u8; size as usize];
 
-        mem_file.seek(SeekFrom::Start(region.start as u64))?;
+        mem_file.seek(SeekFrom::Start(region.start))?;
         match mem_file.read_exact(&mut buffer) {
             Ok(_) => {
                 // Note: we iterate in *non-overlapping* windows/chunks,
@@ -81,18 +100,22 @@ fn search_memory<T: Fn(u64) -> bool>(pid: &str, chunksize: usize, predicate: T) 
                 for (pos, chunk) in buffer.chunks_exact(chunksize).enumerate() {
                     let val = u64::from_le_bytes(chunk.try_into().unwrap());
                     if predicate(val) {
-                        println!(
-                            "0x{:016X} (offset 0x{:08X}): Found pattern 0x{:016x} ({}{})",
-                            region.start + pos,
-                            pos,
-                            val,
-                            region.permissions,
-                            if let Some(ref p) = region.pathname {
-                                format!(", in region {}", p)
-                            } else {
-                                String::new()
-                            }
-                        );
+                        let m = Match {
+                            pid,
+                            uaddr: region.start + pos as u64,
+                            kaddr: val,
+                            regiondesc: format!(
+                                "{}{}",
+                                region.permissions,
+                                if let Some(ref p) = region.pathname {
+                                    format!(" in region {}", p)
+                                } else {
+                                    String::new()
+                                }
+                            ),
+                        };
+                        println!("{}", m);
+                        matches.push(m);
                     }
                 }
             }
@@ -102,18 +125,18 @@ fn search_memory<T: Fn(u64) -> bool>(pid: &str, chunksize: usize, predicate: T) 
         }
     }
 
-    Ok(())
+    Ok(matches)
 }
 
 #[derive(Debug)]
 struct MemoryRegion {
-    start: usize,
-    end: usize,
+    start: u64,
+    end: u64,
     permissions: String,
     pathname: Option<String>,
 }
 
-fn read_memory_maps(pid: &str) -> io::Result<Vec<MemoryRegion>> {
+fn read_memory_maps(pid: u32) -> io::Result<Vec<MemoryRegion>> {
     let path = format!("/proc/{pid}/maps");
     let file = File::open(path)?;
     let reader = io::BufReader::new(file);
@@ -125,8 +148,8 @@ fn read_memory_maps(pid: &str) -> io::Result<Vec<MemoryRegion>> {
         let parts: Vec<&str> = line.split_whitespace().collect();
 
         let address_range: Vec<&str> = parts[0].split('-').collect();
-        let start = usize::from_str_radix(address_range[0], 16).unwrap();
-        let end = usize::from_str_radix(address_range[1], 16).unwrap();
+        let start = u64::from_str_radix(address_range[0], 16).unwrap();
+        let end = u64::from_str_radix(address_range[1], 16).unwrap();
         let permissions = parts[1].to_string();
         let pathname = if parts.len() > 5 {
             Some(parts[5..].join(" "))
