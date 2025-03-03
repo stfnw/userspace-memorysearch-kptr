@@ -16,6 +16,10 @@ fn main() {
     let start: u64 = 0xffffffffb3000000;
     let end: u64 = 0xffffffffb4000000;
 
+    search_memory(PATTERN_LENGTH, |x| start <= x && x <= end);
+}
+
+fn search_memory<T: Fn(u64) -> bool>(chunksize: usize, predicate: T) {
     for entry in fs::read_dir(Path::new("/proc")).unwrap() {
         let path = entry.unwrap().path();
 
@@ -24,7 +28,7 @@ fn main() {
             if let Some(pid_) = path.file_name().and_then(|s| s.to_str()) {
                 if let Ok(pid) = pid_.parse::<u32>() {
                     println!("Found process with PID: {}", pid);
-                    if let Err(e) = search_memory(pid, PATTERN_LENGTH, |x| start <= x && x <= end) {
+                    if let Err(e) = search_memory_pid(pid, chunksize, &predicate) {
                         match e.kind() {
                             io::ErrorKind::PermissionDenied => println!("PID {}: {:?}", pid, e),
                             _ => panic!("{:?}", e),
@@ -56,7 +60,7 @@ impl fmt::Display for Match {
     }
 }
 
-fn search_memory<T: Fn(u64) -> bool>(
+fn search_memory_pid<T: Fn(u64) -> bool>(
     pid: u32,
     chunksize: usize,
     predicate: T,
