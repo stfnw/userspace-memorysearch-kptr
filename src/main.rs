@@ -12,11 +12,15 @@ use std::path::Path;
 const PATTERN_LENGTH: usize = 8; // sizeof(void*)
 
 fn main() {
+    let predicate = create_predicate();
+    search_memory(PATTERN_LENGTH, predicate);
+}
+
+fn create_predicate() -> impl Fn(u64) -> bool {
     // sudo grep -w -e _text -e _etext /proc/kallsyms
     let start: u64 = 0xffffffffb3000000;
     let end: u64 = 0xffffffffb4000000;
-
-    search_memory(PATTERN_LENGTH, |x| start <= x && x <= end);
+    move |x: u64| start <= x && x <= end
 }
 
 fn search_memory<T: Fn(u64) -> bool>(chunksize: usize, predicate: T) {
