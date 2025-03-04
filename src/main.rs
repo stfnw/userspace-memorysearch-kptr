@@ -53,14 +53,12 @@ fn search_memory<T: Fn(u64) -> bool>(chunksize: usize, predicate: T) {
         if path.is_dir() {
             if let Some(pid_) = path.file_name().and_then(|s| s.to_str()) {
                 if let Ok(pid) = pid_.parse::<u32>() {
-                    println!("Found process with PID: {}", pid);
                     if let Err(e) = search_memory_pid(pid, chunksize, &predicate) {
                         match e.kind() {
                             io::ErrorKind::PermissionDenied => println!("PID {}: {:?}", pid, e),
                             _ => panic!("{:?}", e),
                         }
                     }
-                    println!();
                 }
             }
         }
@@ -80,8 +78,8 @@ impl fmt::Display for Match {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(
             f,
-            "PID {}: At 0x{:016X} found pattern 0x{:016x} ({})",
-            self.pid, self.uaddr, self.kaddr, self.regiondesc
+            "Found pattern 0x{:016x} in process PID {:5} at 0x{:016X} ({})",
+            self.kaddr, self.pid, self.uaddr, self.regiondesc
         )
     }
 }
