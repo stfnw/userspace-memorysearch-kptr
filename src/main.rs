@@ -17,10 +17,32 @@ fn main() {
 }
 
 fn create_predicate() -> impl Fn(u64) -> bool {
+    // Get start and end of kernel / vmlinux .text section from /proc/kallsysms.
+    // These are exposed through the symbols _text and _etext respectively.
+    // Access to /proc/kallsyms requires root permissions.
     // sudo grep -w -e _text -e _etext /proc/kallsyms
-    let start: u64 = 0xffffffffb3000000;
-    let end: u64 = 0xffffffffb4000000;
-    move |x: u64| start <= x && x <= end
+
+    let mut vals = Vec::new();
+    for line in io::BufReader::new(File::open("/proc/kallsyms").unwrap()).lines() {
+        let line = line.unwrap();
+        if line.contains("T _text") || line.contains("T _etext") {
+            let val = line.split_whitespace().next().unwrap();
+            let val = u64::from_str_radix(val, 16).unwrap();
+            vals.push(val);
+        }
+    }
+
+    if vals.len() != 2 || vals[0] == 0 || vals[1] == 0 {
+        panic!("Error TODO");
+    }
+
+    let start: u64 = vals[0];
+    let end: u64 = vals[1];
+
+    move |addr: u64| {
+        addr % PATTERN_LENGTH as u64  == 0 // 8-byte-aligned
+        && start <= addr && addr <= end // inside vmlinux .text section
+    }
 }
 
 fn search_memory<T: Fn(u64) -> bool>(chunksize: usize, predicate: T) {
