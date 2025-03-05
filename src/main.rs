@@ -4,6 +4,7 @@
 // I expect it to yield lots of false positives and no actual results.
 // For educational purposes only.
 
+use std::collections::HashSet;
 use std::fmt;
 use std::fs::{self, File};
 use std::io::{self, BufRead, Read, Seek, SeekFrom};
@@ -11,9 +12,27 @@ use std::path::Path;
 
 const PATTERN_LENGTH: usize = 8; // sizeof(void*)
 
+#[derive(Debug)]
+struct Args {
+    continuous: bool,
+}
+
 fn main() {
-    let predicate = create_predicate();
-    search_memory(PATTERN_LENGTH, predicate);
+    if let Some(args) = parse_args() {
+        let predicate = create_predicate();
+        search_memory(PATTERN_LENGTH, predicate, args.continuous);
+    }
+}
+
+fn parse_args() -> Option<Args> {
+    let args: Vec<String> = std::env::args().collect();
+    if args.len() > 2 {
+        return None;
+    }
+
+    let continuous = args.len() == 2 && args[1] == "--continuous";
+
+    Some(Args { continuous })
 }
 
 fn create_predicate() -> impl Fn(u64) -> bool {
@@ -39,43 +58,67 @@ fn create_predicate() -> impl Fn(u64) -> bool {
     let start: u64 = vals[0];
     let end: u64 = vals[1];
 
+    println!(
+        "Kernel .text section starts at 0x{:016x} and ends at 0x{:016x}",
+        start, end
+    );
+
     move |addr: u64| {
         addr % PATTERN_LENGTH as u64  == 0 // 8-byte-aligned
         && start <= addr && addr <= end // inside vmlinux .text section
     }
 }
 
-fn search_memory<T: Fn(u64) -> bool>(chunksize: usize, predicate: T) {
+fn search_memory<T: Fn(u64) -> bool>(chunksize: usize, predicate: T, continuous: bool) {
     let ownpid = std::process::id();
 
-    for entry in fs::read_dir(Path::new("/proc")).unwrap() {
-        let path = entry.unwrap().path();
+    let mut matches: HashSet<Match> = HashSet::new();
 
-        // Check if the entry is a directory and if its name is a number (PID)
-        if path.is_dir() {
-            if let Some(pid_) = path.file_name().and_then(|s| s.to_str()) {
-                if let Ok(pid) = pid_.parse::<u32>() {
-                    // Don't search own process memory.
-                    if pid == ownpid {
-                        continue;
-                    }
+    loop {
+        for entry in fs::read_dir(Path::new("/proc")).unwrap() {
+            let path = entry.unwrap().path();
 
-                    if let Err(e) = search_memory_pid(pid, chunksize, &predicate) {
-                        match e.kind() {
-                            io::ErrorKind::PermissionDenied => println!("PID {}: {:?}", pid, e),
-                            _ => panic!("{:?}", e),
+            if path.is_dir() {
+                if let Some(pid_) = path.file_name().and_then(|s| s.to_str()) {
+                    if let Ok(pid) = pid_.parse::<u32>() {
+                        // Don't search own process memory.
+                        if pid == ownpid {
+                            continue;
+                        }
+
+                        match search_memory_pid(pid, chunksize, &predicate) {
+                            Ok(ms) => {
+                                for m in ms {
+                                    if continuous {
+                                        if matches.contains(&m) {
+                                            continue;
+                                        } else {
+                                            matches.insert(m.clone());
+                                        }
+                                    }
+                                    println!("{}", m);
+                                }
+                            }
+                            Err(e) => match e.kind() {
+                                io::ErrorKind::PermissionDenied => println!("PID {}: {:?}", pid, e),
+                                _ => panic!("{:?}", e),
+                            },
                         }
                     }
                 }
             }
         }
+
+        if !continuous {
+            break;
+        }
     }
 }
 
-
-#[derive(Debug)]
+#[derive(Debug, Eq, Hash, PartialEq, Clone)]
 struct Match {
     pid: u32,
+    pname: String,
     uaddr: u64, // Address in userspace.
     kaddr: u64, // Potential kernel address leak.
     regiondesc: String,
@@ -85,8 +128,8 @@ impl fmt::Display for Match {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(
             f,
-            "Found pattern 0x{:016x} in process PID {:5} at 0x{:016X} ({})",
-            self.kaddr, self.pid, self.uaddr, self.regiondesc
+            "Found pattern 0x{:016x} in process {:16} with pid {:5} at 0x{:016X} ({})",
+            self.kaddr, self.pname, self.pid, self.uaddr, self.regiondesc
         )
     }
 }
@@ -97,6 +140,8 @@ fn search_memory_pid<T: Fn(u64) -> bool>(
     predicate: T,
 ) -> io::Result<Vec<Match>> {
     let mut matches = Vec::new();
+
+    let pname = fs::read_to_string(format!("/proc/{pid}/comm"))?;
 
     let regions = read_memory_maps(pid)?;
     let mut mem_file = File::open(format!("/proc/{pid}/mem"))?;
@@ -137,6 +182,7 @@ fn search_memory_pid<T: Fn(u64) -> bool>(
                     if predicate(val) {
                         let m = Match {
                             pid,
+                            pname: pname.trim().to_string(),
                             uaddr: region.start + pos as u64,
                             kaddr: val,
                             regiondesc: format!(
@@ -149,7 +195,6 @@ fn search_memory_pid<T: Fn(u64) -> bool>(
                                 }
                             ),
                         };
-                        println!("{}", m);
                         matches.push(m);
                     }
                 }
