@@ -46,6 +46,8 @@ fn create_predicate() -> impl Fn(u64) -> bool {
 }
 
 fn search_memory<T: Fn(u64) -> bool>(chunksize: usize, predicate: T) {
+    let ownpid = std::process::id();
+
     for entry in fs::read_dir(Path::new("/proc")).unwrap() {
         let path = entry.unwrap().path();
 
@@ -53,6 +55,11 @@ fn search_memory<T: Fn(u64) -> bool>(chunksize: usize, predicate: T) {
         if path.is_dir() {
             if let Some(pid_) = path.file_name().and_then(|s| s.to_str()) {
                 if let Ok(pid) = pid_.parse::<u32>() {
+                    // Don't search own process memory.
+                    if pid == ownpid {
+                        continue;
+                    }
+
                     if let Err(e) = search_memory_pid(pid, chunksize, &predicate) {
                         match e.kind() {
                             io::ErrorKind::PermissionDenied => println!("PID {}: {:?}", pid, e),
