@@ -13,14 +13,69 @@ use std::path::Path;
 const PATTERN_LENGTH: usize = 8; // sizeof(void*)
 
 #[derive(Debug)]
+enum SearchError {
+    ProcTraversePidsIo(#[allow(dead_code)] io::Error),
+    ProcParseInt {
+        #[allow(dead_code)]
+        file: String,
+        #[allow(dead_code)]
+        val: String,
+        #[allow(dead_code)]
+        err: std::num::ParseIntError,
+    },
+    ProcParseLine {
+        #[allow(dead_code)]
+        file: String,
+        #[allow(dead_code)]
+        line: String,
+    },
+    SearchMemIo {
+        #[allow(dead_code)]
+        pid: u32,
+        #[allow(dead_code)]
+        err: io::Error,
+    },
+    PermissionDeniedKallsyms,
+    SearchMemPermissionDeniedPid {
+        pid: u32,
+        err: io::Error,
+    },
+}
+
+impl fmt::Display for SearchError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{:?}", self)
+    }
+}
+
+impl std::error::Error for SearchError {}
+
+type Result<T> = std::result::Result<T, SearchError>;
+
+impl From<(u32, io::Error)> for SearchError {
+    fn from(err: (u32, io::Error)) -> SearchError {
+        match err.1.kind() {
+            io::ErrorKind::PermissionDenied => SearchError::SearchMemPermissionDeniedPid {
+                pid: err.0,
+                err: err.1,
+            },
+            _ => SearchError::SearchMemIo {
+                pid: err.0,
+                err: err.1,
+            },
+        }
+    }
+}
+
+#[derive(Debug)]
 struct Args {
     continuous: bool,
 }
 
 fn main() {
     if let Some(args) = parse_args() {
-        let predicate = create_predicate();
-        search_memory(PATTERN_LENGTH, predicate, args.continuous);
+        let predicate = create_predicate().unwrap();
+        search_memory(PATTERN_LENGTH, predicate, args.continuous).unwrap();
     }
 }
 
@@ -35,24 +90,37 @@ fn parse_args() -> Option<Args> {
     Some(Args { continuous })
 }
 
-fn create_predicate() -> impl Fn(u64) -> bool {
+fn create_predicate() -> Result<impl Fn(u64) -> bool> {
     // Get start and end of kernel / vmlinux .text section from /proc/kallsysms.
     // These are exposed through the symbols _text and _etext respectively.
     // Access to /proc/kallsyms requires root permissions.
     // sudo grep -w -e _text -e _etext /proc/kallsyms
 
     let mut vals = Vec::new();
-    for line in io::BufReader::new(File::open("/proc/kallsyms").unwrap()).lines() {
-        let line = line.unwrap();
+    for line in
+        io::BufReader::new(File::open("/proc/kallsyms").map_err(SearchError::ProcTraversePidsIo)?)
+            .lines()
+    {
+        let line = line.map_err(SearchError::ProcTraversePidsIo)?;
         if line.contains("T _text") || line.contains("T _etext") {
-            let val = line.split_whitespace().next().unwrap();
-            let val = u64::from_str_radix(val, 16).unwrap();
+            let val = line
+                .split_whitespace()
+                .next()
+                .ok_or(SearchError::ProcParseLine {
+                    file: "/proc/kallsyms".to_string(),
+                    line: line.clone(),
+                })?;
+            let val = u64::from_str_radix(val, 16).map_err(|e| SearchError::ProcParseInt {
+                file: "/proc/kallsyms".to_string(),
+                val: val.to_string(),
+                err: e,
+            })?;
             vals.push(val);
         }
     }
 
     if vals.len() != 2 || vals[0] == 0 || vals[1] == 0 {
-        panic!("Error TODO");
+        return Err(SearchError::PermissionDeniedKallsyms);
     }
 
     let start: u64 = vals[0];
@@ -63,20 +131,24 @@ fn create_predicate() -> impl Fn(u64) -> bool {
         start, end
     );
 
-    move |addr: u64| {
+    Ok(move |addr: u64| {
         addr % PATTERN_LENGTH as u64  == 0 // 8-byte-aligned
         && start <= addr && addr <= end // inside vmlinux .text section
-    }
+    })
 }
 
-fn search_memory<T: Fn(u64) -> bool>(chunksize: usize, predicate: T, continuous: bool) {
+fn search_memory<T: Fn(u64) -> bool>(
+    chunksize: usize,
+    predicate: T,
+    continuous: bool,
+) -> Result<()> {
     let ownpid = std::process::id();
 
     let mut matches: HashSet<Match> = HashSet::new();
 
     loop {
-        for entry in fs::read_dir(Path::new("/proc")).unwrap() {
-            let path = entry.unwrap().path();
+        for entry in fs::read_dir(Path::new("/proc")).map_err(SearchError::ProcTraversePidsIo)? {
+            let path = entry.map_err(SearchError::ProcTraversePidsIo)?.path();
 
             if path.is_dir() {
                 if let Some(pid_) = path.file_name().and_then(|s| s.to_str()) {
@@ -98,12 +170,14 @@ fn search_memory<T: Fn(u64) -> bool>(chunksize: usize, predicate: T, continuous:
                                     }
                                     println!("{}", m);
                                 }
+                                Ok(())
                             }
-                            Err(e) => match e.kind() {
-                                io::ErrorKind::PermissionDenied => println!("PID {}: {:?}", pid, e),
-                                _ => panic!("{:?}", e),
-                            },
-                        }
+                            Err(SearchError::SearchMemPermissionDeniedPid { pid, err }) => {
+                                println!("PID {}: {:?}", pid, err);
+                                Ok(())
+                            }
+                            Err(e) => Err(e),
+                        }?
                     }
                 }
             }
@@ -113,6 +187,8 @@ fn search_memory<T: Fn(u64) -> bool>(chunksize: usize, predicate: T, continuous:
             break;
         }
     }
+
+    Ok(())
 }
 
 #[derive(Debug, Eq, Hash, PartialEq, Clone)]
@@ -138,13 +214,14 @@ fn search_memory_pid<T: Fn(u64) -> bool>(
     pid: u32,
     chunksize: usize,
     predicate: T,
-) -> io::Result<Vec<Match>> {
+) -> Result<Vec<Match>> {
     let mut matches = Vec::new();
 
-    let pname = fs::read_to_string(format!("/proc/{pid}/comm"))?;
+    let pname = fs::read_to_string(format!("/proc/{pid}/comm")).map_err(|e| (pid, e))?;
 
     let regions = read_memory_maps(pid)?;
-    let mut mem_file = File::open(format!("/proc/{pid}/mem"))?;
+    let mem_file_path = format!("/proc/{pid}/mem");
+    let mut mem_file = File::open(mem_file_path).map_err(|e| (pid, e))?;
 
     for region in regions {
         // Exclude non-readable memory regions.
@@ -172,7 +249,9 @@ fn search_memory_pid<T: Fn(u64) -> bool>(
         let size = region.end - region.start;
         let mut buffer = vec![0u8; size as usize];
 
-        mem_file.seek(SeekFrom::Start(region.start))?;
+        mem_file
+            .seek(SeekFrom::Start(region.start))
+            .map_err(|e| (pid, e))?;
         match mem_file.read_exact(&mut buffer) {
             Ok(_) => {
                 // Note: we iterate in *non-overlapping* windows/chunks,
@@ -216,20 +295,30 @@ struct MemoryRegion {
     pathname: Option<String>,
 }
 
-fn read_memory_maps(pid: u32) -> io::Result<Vec<MemoryRegion>> {
+fn read_memory_maps(pid: u32) -> Result<Vec<MemoryRegion>> {
     let path = format!("/proc/{pid}/maps");
-    let file = File::open(path)?;
+    let file = File::open(path.clone()).map_err(|e| (pid, e))?;
     let reader = io::BufReader::new(file);
 
     let mut regions = Vec::new();
 
     for line in reader.lines() {
-        let line = line?;
+        let line = line.map_err(|e| (pid, e))?;
         let parts: Vec<&str> = line.split_whitespace().collect();
 
         let address_range: Vec<&str> = parts[0].split('-').collect();
-        let start = u64::from_str_radix(address_range[0], 16).unwrap();
-        let end = u64::from_str_radix(address_range[1], 16).unwrap();
+        let start =
+            u64::from_str_radix(address_range[0], 16).map_err(|err| SearchError::ProcParseInt {
+                file: path.clone(),
+                val: address_range[0].to_string(),
+                err,
+            })?;
+        let end =
+            u64::from_str_radix(address_range[1], 16).map_err(|err| SearchError::ProcParseInt {
+                file: path.clone(),
+                val: address_range[0].to_string(),
+                err,
+            })?;
         let permissions = parts[1].to_string();
         let pathname = if parts.len() > 5 {
             Some(parts[5..].join(" "))
