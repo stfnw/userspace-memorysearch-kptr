@@ -12,6 +12,13 @@ use std::path::Path;
 
 const PATTERN_LENGTH: usize = 8; // sizeof(void*)
 
+fn main() {
+    if let Some(args) = parse_args() {
+        let predicate = create_predicate().unwrap();
+        search_memory(PATTERN_LENGTH, predicate, args.continuous).unwrap();
+    }
+}
+
 #[derive(Debug)]
 enum SearchError {
     ProcTraversePidsIo(#[allow(dead_code)] io::Error),
@@ -72,13 +79,6 @@ struct Args {
     continuous: bool,
 }
 
-fn main() {
-    if let Some(args) = parse_args() {
-        let predicate = create_predicate().unwrap();
-        search_memory(PATTERN_LENGTH, predicate, args.continuous).unwrap();
-    }
-}
-
 fn parse_args() -> Option<Args> {
     let args: Vec<String> = std::env::args().collect();
     if args.len() > 2 {
@@ -137,6 +137,25 @@ fn create_predicate() -> Result<impl Fn(u64) -> bool> {
     })
 }
 
+#[derive(Debug, Eq, Hash, PartialEq, Clone)]
+struct Match {
+    pid: u32,
+    pname: String,
+    uaddr: u64, // Address in userspace.
+    kaddr: u64, // Potential kernel address leak.
+    regiondesc: String,
+}
+
+impl fmt::Display for Match {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(
+            f,
+            "Found pattern 0x{:016x} in process {:16} with pid {:7} at 0x{:016X} ({})",
+            self.kaddr, self.pname, self.pid, self.uaddr, self.regiondesc
+        )
+    }
+}
+
 fn search_memory<T: Fn(u64) -> bool>(
     chunksize: usize,
     predicate: T,
@@ -189,25 +208,6 @@ fn search_memory<T: Fn(u64) -> bool>(
     }
 
     Ok(())
-}
-
-#[derive(Debug, Eq, Hash, PartialEq, Clone)]
-struct Match {
-    pid: u32,
-    pname: String,
-    uaddr: u64, // Address in userspace.
-    kaddr: u64, // Potential kernel address leak.
-    regiondesc: String,
-}
-
-impl fmt::Display for Match {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(
-            f,
-            "Found pattern 0x{:016x} in process {:16} with pid {:5} at 0x{:016X} ({})",
-            self.kaddr, self.pname, self.pid, self.uaddr, self.regiondesc
-        )
-    }
 }
 
 fn search_memory_pid<T: Fn(u64) -> bool>(
