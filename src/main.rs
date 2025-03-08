@@ -13,6 +13,10 @@ use std::path::Path;
 const PATTERN_LENGTH: usize = 8; // sizeof(void*)
 
 fn main() {
+    if cfg!(not(target_os = "linux")) {
+        panic!("This program can only run on Linux!");
+    }
+
     let args = parse_args().unwrap();
     let predicate = create_predicate().unwrap();
     search_memory(PATTERN_LENGTH, predicate, args.continuous).unwrap();
