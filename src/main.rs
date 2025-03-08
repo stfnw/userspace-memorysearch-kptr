@@ -240,12 +240,17 @@ fn search_memory_pid<T: Fn(u64) -> bool>(
             continue;
         }
 
-        // https://lwn.net/Articles/615809/ Implementing virtual system calls.
-        // These memory regions somehow cause an error on reading, even thow by page table
-        // permissions they are supposed to be readable. => Just exclude them, they probably don't
-        // contain anything of interest.
+        // Filter special cases on pathname
         if let Some(p) = &region.pathname {
-            if p.contains("[vdso]") || p.contains("[vvar]") || p.contains("[vvar_vclock]") {
+            // https://lwn.net/Articles/615809/ Implementing virtual system calls.
+            // These memory regions somehow cause an error on reading, even thow by page table
+            // permissions they are supposed to be readable. => Just exclude them, they probably don't
+            // contain anything of interest.
+            if p == "[vdso]" || p == "[vvar]" || p == "[vvar_vclock]" {
+                continue;
+            }
+
+            if p.starts_with("/dev/dri/") && region.permissions == "rw-s" {
                 continue;
             }
         }
